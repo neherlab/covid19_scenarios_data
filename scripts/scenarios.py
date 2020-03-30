@@ -8,6 +8,7 @@ import sys
 sys.path.append('..')
 from paths import TMP_CASES, BASE_PATH, JSON_DIR
 from scripts.tsv import parse as parse_tsv
+from scripts.model import fit_population
 
 # ------------------------------------------------------------------------
 # Globals
@@ -91,27 +92,27 @@ class Object:
         return json.dumps(self, default=lambda x: x.__dict__, sort_keys=True, indent=4)
 
 class PopulationParams(Object):
-    def __init__(self, region, country, population, beds, icus):
+    def __init__(self, region, country, population, beds, icus, initialCases=10):
         self.populationServed    = int(population)
         self.country             = country
-        self.suspectedCasesToday = Fitter.cases_on_tMin
-        self.importsPerDay       = round(max(3e-4 * float(population)**0.5, .1),1)
+        self.suspectedCasesToday = initialCases
+        self.importsPerDay       = 1, #round(max(3e-4 * float(population)**0.5, .1),1)
         self.hospitalBeds        = int(beds)
         self.ICUBeds             = int(icus)
         self.cases               = region
 
 class EpidemiologicalParams(Object):
-    def __init__(self, region, hemisphere):
+    def __init__(self, R0=None, hemisphere="Tropical"):
         self.latencyTime     = 5
         self.infectiousPeriod   = 3
         self.lengthHospitalStay = 4
         self.lengthICUStay      = 14
         if hemisphere:
             if hemisphere == 'Northern':
-                self.seasonalForcing    = 0.2
+                self.seasonalForcing    = 0.0
                 self.peakMonth          = 0
             elif hemisphere == 'Southern':
-                self.seasonalForcing    = 0.2
+                self.seasonalForcing    = 0.0
                 self.peakMonth          = 6
             elif hemisphere == 'Tropical':
                 self.seasonalForcing    = 0
@@ -122,15 +123,14 @@ class EpidemiologicalParams(Object):
             self.seasonalForcing    = 0.2
             self.peakMonth          = 0
         self.overflowSeverity   = 2
-        if region in FIT_CASE_DATA:
-            self.r0 = round(FIT_CASE_DATA[region]['r0'],1)
+        if R0:
+            self.r0 = round(R0,1)
         else:
             self.r0 = 2.7
 
 class ContainmentParams(Object):
-    def __init__(self):
-        self.reduction    = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
-        # self.reduction    = [1.0, 0.8, 0.7, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6, 0.6]
+    def __init__(self, reduction=None):
+        self.reduction    = reduction or [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         self.numberPoints = len(self.reduction)
 
 class DateRange(Object):
@@ -139,8 +139,8 @@ class DateRange(Object):
         self.tMax = tMax
 
 class SimulationParams(Object):
-    def __init__(self, region):
-        tMin = FIT_CASE_DATA[region]['tMin'] if region in FIT_CASE_DATA else "2020-03-01"
+    def __init__(self, region, tMin = None):
+        tMin = tMin or "2020-03-01"
         tMax = "2020-09-01"
         self.simulationTimeRange  = DateRange(tMin, tMax)
         self.numberStochasticRuns = 0
@@ -148,11 +148,12 @@ class SimulationParams(Object):
 # TODO: Region and country provide redudant information
 #       Condense the information into one field.
 class AllParams(Object):
-    def __init__(self, region, country, population, beds, icus, hemisphere):
-        self.population      = PopulationParams(region, country, population, beds, icus)
-        self.epidemiological = EpidemiologicalParams(region, hemisphere)
-        self.simulation      = SimulationParams(region)
-        self.containment     = ContainmentParams()
+    def __init__(self, region, country, population, beds, icus, hemisphere,
+                 tMin=None, reduction=None, R0=None, initialCases=10):
+        self.population      = PopulationParams(region, country, population, beds, icus, initialCases=initialCases)
+        self.epidemiological = EpidemiologicalParams(R0, hemisphere)
+        self.simulation      = SimulationParams(region, tMin)
+        self.containment     = ContainmentParams(reduction)
 
 # ------------------------------------------------------------------------
 # Functions
@@ -169,12 +170,12 @@ def fit_all_case_data():
         if fit:
             FIT_CASE_DATA[region] = fit
 
+
 # ------------------------------------------------------------------------
 # Main point of entry
 
-def generate(OUTPUT_JSON):
+def generate(OUTPUT_JSON=None):
     scenario = {}
-    fit_all_case_data()
 
     with open(SCENARIO_POPS, 'r') as fd:
         rdr = csv.reader(fd, delimiter='\t')
@@ -186,14 +187,22 @@ def generate(OUTPUT_JSON):
                'icus' : hdr.index('ICUBeds'),
                'hemisphere' : hdr.index('hemisphere')}
 
-        
+
         args = ['name', 'ages', 'size', 'beds', 'icus', 'hemisphere']
         for region in rdr:
-            entry = [region[idx[arg]] for arg in args]
-            scenario[region[idx['name']]] = AllParams(*entry)
+            print(f"Fitting region '{region}'")
+            res = fit_population(region[idx['name']])
 
-    with open(OUTPUT_JSON, "w+") as fd:
-        marshalJSON(scenario, fd)
+            entry = [region[idx[arg]] for arg in args]
+            scenario[region[idx['name']]] = AllParams(*entry,
+                    R0=res["params"].rates.R0, tMin = res['tMin'],
+                    initialCases=res['initialCases'])
+
+    if OUTPUT_JSON:
+        with open(OUTPUT_JSON, "w+") as fd:
+            marshalJSON(scenario, fd)
+
+    return scenario
 
 if __name__ == '__main__':
     generate()
